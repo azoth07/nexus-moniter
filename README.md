@@ -1,7 +1,8 @@
 # VPS监控系统
 
 Windows Server VPS监控系统，包含客户端和服务端。赛博朋克风格
-<img width="1114" height="884" alt="image" src="https://github.com/user-attachments/assets/cf3e0b7c-8b29-482f-b2a5-6a7cc6c04de8" />
+<img width="1690" height="1292" alt="image" src="https://github.com/user-attachments/assets/4725c64b-f7c7-4fae-ab7f-3a05a040e9c1" />
+
 
 
 
