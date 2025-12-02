@@ -272,10 +272,12 @@ def get_chart_data(start_date=None, end_date=None, hostname=None):
         if hostname_val not in chart_data:
             chart_data[hostname_val] = {
                 'labels': [],
-                'data': []
+                'data': [],
+                'status': []  # Add status array for color determination
             }
         chart_data[hostname_val]['labels'].append(timestamp)
-        chart_data[hostname_val]['data'].append(1 if status == 'online' else 0)
+        chart_data[hostname_val]['data'].append(1)  # Always 1 for bar height
+        chart_data[hostname_val]['status'].append(status)  # Store actual status
     
     return chart_data
 
@@ -1409,17 +1411,24 @@ HTML_TEMPLATE = '''
                     if (statusChart) statusChart.destroy();
                     
                     const datasets = [];
-                    const colors = ['#00f3ff', '#bc13fe', '#0aff0a', '#ff003c', '#f9d423'];
+                    // Base colors for different hosts (used for online status)
+                    const onlineColors = ['#0aff0a', '#00f3ff', '#bc13fe', '#f9d423', '#00c6ff'];
+                    const offlineColor = '#ff003c'; // Red for offline/disconnected
                     
                     let colorIndex = 0;
                     for (const [hostname, data] of Object.entries(chartData)) {
-                        const color = colors[colorIndex % colors.length];
+                        const baseColor = onlineColors[colorIndex % onlineColors.length];
+                        // Use status array to determine colors (online=green/base, offline=red)
+                        const statusArr = data.status || [];
+                        const bgColors = statusArr.map(s => s === 'online' ? baseColor : offlineColor);
+                        const borderColors = statusArr.map(s => s === 'online' ? baseColor : offlineColor);
+                        
                         datasets.push({
                             label: hostname,
                             data: data.data,
-                            backgroundColor: color,
-                            borderColor: color,
-                            borderWidth: 2,
+                            backgroundColor: bgColors,
+                            borderColor: borderColors,
+                            borderWidth: 1,
                             pointBackgroundColor: '#fff',
                             pointRadius: 3,
                             tension: 0.4
@@ -1452,7 +1461,19 @@ HTML_TEMPLATE = '''
                                 }
                             },
                             plugins: {
-                                legend: { labels: { color: '#fff', font: { family: "'Orbitron', sans-serif" } } }
+                                legend: { labels: { color: '#fff', font: { family: "'Orbitron', sans-serif" } } },
+                                tooltip: {
+                                    callbacks: {
+                                        label: function(context) {
+                                            const datasetIndex = context.datasetIndex;
+                                            const index = context.dataIndex;
+                                            const hostname = context.dataset.label;
+                                            const statusArr = chartData[hostname]?.status || [];
+                                            const status = statusArr[index] || 'unknown';
+                                            return `${hostname}: ${status === 'online' ? 'ONLINE' : 'OFFLINE'}`;
+                                        }
+                                    }
+                                }
                             }
                         }
                     });
