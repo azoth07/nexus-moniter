@@ -13,15 +13,28 @@ import time
 
 app = Flask(__name__)
 
-# 配置
-DB_FILE = "monitor.db"
-SERVER_KEY = "your-secret-key"  # 与客户端保持一致
-ALERT_INTERVAL_MINUTES = 20  # 超过20分钟没收到消息视为断联
-TIMEZONE_OFFSET_HOURS = 0  # 时区偏移（小时），例如：+8表示东八区，-5表示西五区
+# Load configuration from config.json
+def load_config():
+    """Load configuration from config.json file"""
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+    if not os.path.exists(config_path):
+        print(f"Warning: config.json not found, using default values")
+        return {}
+    with open(config_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
 
-# PushPlus推送配置
-PUSHPLUS_TOKEN = "your key"
-PUSHPLUS_URL = "https://www.pushplus.plus/send"
+_config = load_config()
+
+# Configuration
+DB_FILE = _config.get("db_file", "monitor.db")
+SERVER_KEY = _config.get("server_key", "your-secret-key")
+ALERT_INTERVAL_MINUTES = _config.get("alert_interval_minutes", 20)
+TIMEZONE_OFFSET_HOURS = _config.get("timezone_offset_hours", 0)
+SERVER_PORT = _config.get("server_port", 9000)
+
+# PushPlus notification config
+PUSHPLUS_TOKEN = _config.get("pushplus_token", "")
+PUSHPLUS_URL = _config.get("pushplus_url", "https://www.pushplus.plus/send")
 
 # 数据库锁
 db_lock = Lock()
@@ -378,7 +391,7 @@ def send_offline_notification(hostname, minutes_offline):
 
 def send_startup_notification():
     """发送启动通知"""
-    content = f"VPS监控系统已启动\n启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n监控端口: 9000"
+    content = f"VPS监控系统已启动\n启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n监控端口: {SERVER_PORT}"
     return send_pushplus_notification("监控系统启动", content)
 
 def send_new_vps_notification(hostname, local_ip):
@@ -1001,19 +1014,35 @@ HTML_TEMPLATE = '''
         }
 
         .cyber-input {
-            background: rgba(0, 0, 0, 0.3);
-            border: 1px solid var(--glass-border);
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid var(--neon-blue);
             color: #fff;
             padding: 10px 15px;
             border-radius: 4px;
             font-family: 'Rajdhani', sans-serif;
+            font-size: 1rem;
             outline: none;
             transition: 0.3s;
         }
 
         .cyber-input:focus {
-            border-color: var(--neon-blue);
-            box-shadow: 0 0 10px rgba(0, 243, 255, 0.2);
+            border-color: var(--neon-pink);
+            box-shadow: 0 0 15px rgba(188, 19, 254, 0.4);
+        }
+
+        /* Date input specific styles */
+        .cyber-input[type="date"] {
+            min-width: 160px;
+            cursor: pointer;
+        }
+
+        .cyber-input[type="date"]::-webkit-calendar-picker-indicator {
+            filter: invert(1) brightness(2);
+            cursor: pointer;
+        }
+
+        .cyber-input::placeholder {
+            color: var(--text-dim);
         }
 
         /* Table */
@@ -1625,9 +1654,9 @@ if __name__ == '__main__':
     checker_thread.start()
     
     print("监控服务器启动")
-    print("访问 http://localhost:9000 查看监控界面")
+    print(f"访问 http://localhost:{SERVER_PORT} 查看监控界面")
     print("PushPlus通知已启用，断联时将自动发送通知")
     print("按 Ctrl+C 停止服务器")
     
-    app.run(host='0.0.0.0', port=9000, debug=False)
+    app.run(host='0.0.0.0', port=SERVER_PORT, debug=False)
 

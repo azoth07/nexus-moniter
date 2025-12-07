@@ -1,0 +1,10 @@
+{
+    "db_file": "monitor.db",
+    "server_key": "your-secret-key-here",
+    "alert_interval_minutes": 20,
+    "timezone_offset_hours": 0,
+    "pushplus_token": "your-pushplus-token-here",
+    "pushplus_url": "https://www.pushplus.plus/send",
+    "server_port": 9000
+}
+
