@@ -10,15 +10,23 @@ import time
 import platform
 from datetime import datetime
 import logging
+from logging.handlers import RotatingFileHandler
 
-# 配置日志
+# Configure logging with rotation to prevent unlimited log file growth
+log_handler = RotatingFileHandler(
+    'monitor_client.log',
+    maxBytes=10*1024*1024,  # 10MB max file size
+    backupCount=3,  # Keep 3 backup files
+    encoding='utf-8'
+)
+log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('monitor_client.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+    handlers=[log_handler, console_handler]
 )
 
 # 服务器配置

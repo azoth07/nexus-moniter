@@ -5,6 +5,8 @@
     "timezone_offset_hours": 0,
     "pushplus_token": "your-pushplus-token-here",
     "pushplus_url": "https://www.pushplus.plus/send",
-    "server_port": 9000
+    "server_port": 9000,
+    "data_retention_days": 30,
+    "cleanup_interval_hours": 24
 }
 

@@ -32,6 +32,11 @@ ALERT_INTERVAL_MINUTES = _config.get("alert_interval_minutes", 20)
 TIMEZONE_OFFSET_HOURS = _config.get("timezone_offset_hours", 0)
 SERVER_PORT = _config.get("server_port", 9000)
 
+# Data retention policy (days)
+DATA_RETENTION_DAYS = _config.get("data_retention_days", 30)
+# Cleanup interval (hours)
+CLEANUP_INTERVAL_HOURS = _config.get("cleanup_interval_hours", 24)
+
 # PushPlus notification config
 PUSHPLUS_TOKEN = _config.get("pushplus_token", "")
 PUSHPLUS_URL = _config.get("pushplus_url", "https://www.pushplus.plus/send")
@@ -240,21 +245,27 @@ def get_all_statuses(limit=1000, page=1, page_size=100, start_date=None, end_dat
     }
 
 def get_chart_data(start_date=None, end_date=None, hostname=None):
-    """获取图表数据，按时间顺序显示VPS状态"""
+    """Get chart data with optimized query and stricter limits"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    # 构建查询条件
+    # Build query conditions
     where_clauses = []
     params = []
     
-    if start_date:
+    # If no date range specified, limit to last 7 days to prevent excessive data loading
+    if not start_date and not end_date:
+        default_start = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
         where_clauses.append("COALESCE(server_timestamp, client_timestamp) >= ?")
-        params.append(start_date)
-    
-    if end_date:
-        where_clauses.append("COALESCE(server_timestamp, client_timestamp) <= ?")
-        params.append(end_date)
+        params.append(default_start)
+    else:
+        if start_date:
+            where_clauses.append("COALESCE(server_timestamp, client_timestamp) >= ?")
+            params.append(start_date)
+        
+        if end_date:
+            where_clauses.append("COALESCE(server_timestamp, client_timestamp) <= ?")
+            params.append(end_date)
     
     if hostname:
         where_clauses.append("hostname = ?")
@@ -262,7 +273,7 @@ def get_chart_data(start_date=None, end_date=None, hostname=None):
     
     where_sql = " WHERE " + " AND ".join(where_clauses) if where_clauses else ""
     
-    # 查询数据，按时间升序排列（用于图表）
+    # Query data with stricter limit (500 instead of 1000)
     query_sql = f'''
         SELECT 
             hostname,
@@ -270,15 +281,18 @@ def get_chart_data(start_date=None, end_date=None, hostname=None):
             status
         FROM status_log
         {where_sql}
-        ORDER BY COALESCE(server_timestamp, client_timestamp) ASC
-        LIMIT 1000
+        ORDER BY COALESCE(server_timestamp, client_timestamp) DESC
+        LIMIT 500
     '''
     cursor.execute(query_sql, params)
     
     results = cursor.fetchall()
     conn.close()
     
-    # 按主机名分组
+    # Reverse for chronological order in chart
+    results = list(reversed(results))
+    
+    # Group by hostname
     chart_data = {}
     for row in results:
         hostname_val, timestamp, status = row
@@ -286,11 +300,11 @@ def get_chart_data(start_date=None, end_date=None, hostname=None):
             chart_data[hostname_val] = {
                 'labels': [],
                 'data': [],
-                'status': []  # Add status array for color determination
+                'status': []
             }
         chart_data[hostname_val]['labels'].append(timestamp)
-        chart_data[hostname_val]['data'].append(1)  # Always 1 for bar height
-        chart_data[hostname_val]['status'].append(status)  # Store actual status
+        chart_data[hostname_val]['data'].append(1)
+        chart_data[hostname_val]['status'].append(status)
     
     return chart_data
 
@@ -1629,12 +1643,58 @@ HTML_TEMPLATE = '''
 
 '''
 
+def cleanup_old_data():
+    """Clean up old data from database to prevent unlimited growth"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        # Calculate cutoff date based on retention policy
+        cutoff_date = (datetime.now() - timedelta(days=DATA_RETENTION_DAYS)).strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Delete old status logs
+        cursor.execute('''
+            DELETE FROM status_log 
+            WHERE COALESCE(server_timestamp, client_timestamp) < ?
+        ''', (cutoff_date,))
+        deleted_status = cursor.rowcount
+        
+        # Delete old alert logs
+        cursor.execute('''
+            DELETE FROM alert_log 
+            WHERE alert_time < ?
+        ''', (cutoff_date,))
+        deleted_alerts = cursor.rowcount
+        
+        conn.commit()
+        conn.close()
+        
+        # Vacuum database to reclaim space
+        if deleted_status > 0 or deleted_alerts > 0:
+            conn = sqlite3.connect(DB_FILE)
+            conn.execute('VACUUM')
+            conn.close()
+            print(f"数据库清理完成: 删除了 {deleted_status} 条状态记录和 {deleted_alerts} 条通知记录")
+        
+    except Exception as e:
+        print(f"数据库清理错误: {e}")
+
 def background_checker():
-    """后台定期检查断联状态"""
+    """Background task for checking connection status and cleanup"""
+    last_cleanup = datetime.now()
+    
     while True:
         try:
-            time.sleep(60)  # 每分钟检查一次
+            time.sleep(60)  # Check every minute
             check_connection_status()
+            
+            # Perform cleanup based on configured interval
+            now = datetime.now()
+            hours_since_cleanup = (now - last_cleanup).total_seconds() / 3600
+            if hours_since_cleanup >= CLEANUP_INTERVAL_HOURS:
+                cleanup_old_data()
+                last_cleanup = now
+                
         except Exception as e:
             print(f"后台检查错误: {e}")
             time.sleep(60)
