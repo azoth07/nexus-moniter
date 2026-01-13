@@ -146,15 +146,25 @@ def init_database():
     conn.close()
 
 def insert_status(data):
-    """插入状态记录，返回是否是新VPS"""
+    """插入状态记录，返回 (是否是新VPS, 是否从离线恢复)"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
     hostname = data.get('hostname')
     
-    # 检查是否是新VPS（首次出现）
-    cursor.execute('SELECT COUNT(*) FROM status_log WHERE hostname = ?', (hostname,))
-    is_new_vps = cursor.fetchone()[0] == 0
+    # 获取该主机的最新一条记录，用于检测状态变化
+    cursor.execute('''
+        SELECT status FROM status_log 
+        WHERE hostname = ? 
+        ORDER BY COALESCE(server_timestamp, client_timestamp) DESC 
+        LIMIT 1
+    ''', (hostname,))
+    last_row = cursor.fetchone()
+    
+    is_new_vps = last_row is None
+    was_offline = False
+    if last_row and last_row[0] == 'offline':
+        was_offline = True
     
     # 使用服务端时间作为主要时间戳
     server_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -187,7 +197,7 @@ def insert_status(data):
     conn.commit()
     conn.close()
     
-    return is_new_vps
+    return is_new_vps, was_offline
 
 def get_all_statuses(limit=1000, page=1, page_size=100, start_date=None, end_date=None, hostname=None):
     """获取所有状态记录，支持分页和日期区间查询"""
@@ -375,18 +385,23 @@ def get_latest_status_by_hostname():
 def send_pushplus_notification(title, content):
     """发送PushPlus通知（通用函数）"""
     # Check if token is configured
-    if not PUSHPLUS_TOKEN or PUSHPLUS_TOKEN == "your-pushplus-token":
+    if not PUSHPLUS_TOKEN or PUSHPLUS_TOKEN in ["", "your-pushplus-token", "your-pushplus-token-here"]:
         print(f"[通知] PushPlus Token未配置，跳过通知: {title}")
         return False
     
     try:
-        # 按照用户要求的URL格式，参数在URL中
-        url = f"{PUSHPLUS_URL}?token={PUSHPLUS_TOKEN}&title={requests.utils.quote(title)}&content={requests.utils.quote(content)}&template=html"
+        # 使用JSON POST发送通知，这是PushPlus推荐的方式
+        payload = {
+            "token": PUSHPLUS_TOKEN,
+            "title": title,
+            "content": content,
+            "template": "html"
+        }
         
         print(f"[通知] 正在发送PushPlus通知: {title}")
         
         # 发送POST请求
-        response = requests.post(url, timeout=10)
+        response = requests.post(PUSHPLUS_URL, json=payload, timeout=10)
         
         print(f"[通知] PushPlus响应状态码: {response.status_code}")
         
@@ -400,9 +415,9 @@ def send_pushplus_notification(title, content):
                 else:
                     print(f"[通知] PushPlus通知发送失败: {result.get('msg', '未知错误')}")
                     return False
-            except:
+            except Exception as e:
                 # 如果返回的不是JSON，也认为成功（某些API可能返回纯文本）
-                print(f"[通知] PushPlus通知发送成功: {title} (HTTP {response.status_code})")
+                print(f"[通知] PushPlus响应解析解析失败，假设发送成功: {title} (HTTP {response.status_code})")
                 return True
         else:
             print(f"[通知] PushPlus通知请求失败: HTTP {response.status_code}, 响应: {response.text}")
@@ -548,14 +563,6 @@ def check_connection_status():
                             record_alert(hostname, alert_type='offline')
                             print(f"[检查] {hostname}: 下线通知已发送")
                 
-                elif old_status == 'offline' and new_status == 'online':
-                    # VPS上线通知：只要恢复在线且最近10分钟内没发过上线通知（避免频繁抖动）
-                    if not has_sent_alert_recently(hostname, alert_type='online', minutes=10):
-                        print(f"[检查] {hostname}: 状态从离线恢复为在线，发送通知...")
-                        if send_online_notification(hostname, local_ip):
-                            record_alert(hostname, alert_type='online')
-                            print(f"[检查] {hostname}: 上线通知已发送")
-                            
             except Exception as e:
                 print(f"[检查] {hostname} 检查状态错误: {e}")
         
@@ -576,18 +583,26 @@ def receive_status():
         if not status_data:
             return jsonify({"error": "No data provided"}), 400
         
-        # 插入数据库并检测是否是新VPS
+        # 插入数据库并检测是否是新VPS或从离线恢复
         is_new_vps = False
+        was_recovery = False
         with db_lock:
-            is_new_vps = insert_status(status_data)
+            is_new_vps, was_recovery = insert_status(status_data)
+        
+        hostname = status_data.get('hostname', 'Unknown')
+        local_ip = status_data.get('local_ip', 'Unknown')
         
         # 如果是新VPS，发送通知
         if is_new_vps:
-            print(f"检测到新VPS上线: {status_data.get('hostname')}")
-            send_new_vps_notification(
-                status_data.get('hostname', 'Unknown'),
-                status_data.get('local_ip', 'Unknown')
-            )
+            print(f"检测到新VPS上线: {hostname}")
+            send_new_vps_notification(hostname, local_ip)
+        # 如果是从离线恢复，发送恢复通知
+        elif was_recovery:
+            # 避免频繁发送恢复通知（10分钟内只发一次）
+            if not has_sent_alert_recently(hostname, alert_type='online', minutes=10):
+                print(f"检测到VPS从离线恢复: {hostname}")
+                if send_online_notification(hostname, local_ip):
+                    record_alert(hostname, alert_type='online')
         
         # 接收状态后，由后台线程统一检查断联情况，避免处理请求时产生额外负载
         # check_connection_status()
