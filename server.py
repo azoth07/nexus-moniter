@@ -424,11 +424,6 @@ def send_online_notification(hostname, local_ip):
     content = f"VPS已恢复在线\n主机名: {hostname}\nIP地址: {local_ip}\n恢复时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     return send_pushplus_notification("✅ VPS恢复在线", content)
 
-def send_startup_notification():
-    """发送启动通知"""
-    content = f"VPS监控系统已启动\n启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n监控端口: {SERVER_PORT}"
-    return send_pushplus_notification("监控系统启动", content)
-
 def send_new_vps_notification(hostname, local_ip):
     """发送新增VPS通知"""
     content = f"检测到新VPS上线\n主机名: {hostname}\nIP地址: {local_ip}\n检测时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -547,20 +542,14 @@ def check_connection_status():
             
             # 状态变更或持续离线重发逻辑
             if new_status == 'offline':
-                # 只要满足：1.最近2分钟内没有发过离线通知
-                if not has_sent_alert_recently(hostname, alert_type='offline', minutes=2):
-                    # 检查连续发送次数
-                    offline_count = get_consecutive_offline_count(hostname)
-                    
-                    if offline_count < 5:
-                        print(f"[检查] {hostname}: 满足离线通知条件 (离线:{minutes_diff:.1f}min, 已发:{offline_count}次), 准备发送...")
-                        if send_offline_notification(hostname, minutes_diff):
-                            record_alert(hostname, alert_type='offline')
-                            print(f"[检查] {hostname}: 下线通知已发送 ({offline_count + 1}/5)")
-                    else:
-                        # 只有在第一次达到5次时打印这个日志，避免一直刷屏
-                        if offline_count == 5 and old_status == 'online':
-                             print(f"[检查] {hostname}: 已连续发送 5 次离线通知，停止后续推送")
+                # 检查自上次上线以来是否发送过离线通知
+                offline_count = get_consecutive_offline_count(hostname)
+                
+                if offline_count == 0:
+                    print(f"[检查] {hostname}: 检测到下线 (离线:{minutes_diff:.1f}min), 发送唯一一次通知...")
+                    if send_offline_notification(hostname, minutes_diff):
+                        record_alert(hostname, alert_type='offline')
+                        print(f"[检查] {hostname}: 下线通知已发送 (本次离线周期仅此一次)")
             
             elif old_status == 'offline' and new_status == 'online':
                 # VPS上线通知：只要恢复在线且最近10分钟内没发过上线通知（避免频繁抖动）
@@ -679,10 +668,6 @@ def test_notification():
             # Test online notification
             success = send_online_notification(hostname, local_ip)
             message = "上线通知测试"
-        elif notification_type == 'startup':
-            # Test startup notification
-            success = send_startup_notification()
-            message = "启动通知测试"
         else:
             return jsonify({"success": False, "error": "未知的通知类型"}), 400
         
@@ -1389,9 +1374,6 @@ HTML_TEMPLATE = '''
                     <button class="cyber-btn" onclick="testNotification('online')" style="width: 100%; padding: 15px; border-color: var(--neon-green); color: var(--neon-green);">
                         <i class="fas fa-check-circle"></i> 测试VPS上线通知
                     </button>
-                    <button class="cyber-btn" onclick="testNotification('startup')" style="width: 100%; padding: 15px;">
-                        <i class="fas fa-rocket"></i> 测试系统启动通知
-                    </button>
                 </div>
                 <div id="testResult" style="margin-top: 20px; padding: 10px; border-radius: 5px; display: none;"></div>
             </div>
@@ -1917,9 +1899,6 @@ if __name__ == '__main__':
     
     # 启动时检查一次状态
     check_connection_status()
-    
-    # 发送启动通知
-    send_startup_notification()
     
     # 启动后台检查线程
     checker_thread = Thread(target=background_checker, daemon=True)
