@@ -504,68 +504,63 @@ def get_consecutive_offline_count(hostname):
 
 def check_connection_status():
     """检查连接状态，更新断联记录（基于服务端时间）"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    latest_statuses = get_latest_status_by_hostname()
-    now = datetime.now()
-    
-    print(f"[检查] 开始检查连接状态，共 {len(latest_statuses)} 台主机")
-    
-    for status in latest_statuses:
-        try:
-            hostname = status['hostname']
-            local_ip = status.get('local_ip', 'Unknown')
-            
-            # 使用server_timestamp作为判断依据
-            timestamp_str = status.get('server_timestamp') or status.get('client_timestamp') or status.get('timestamp')
-            if not timestamp_str:
-                print(f"[检查] {hostname}: 无时间戳，跳过")
-                continue
+    with db_lock:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        latest_statuses = get_latest_status_by_hostname()
+        now = datetime.now()
+        
+        print(f"[检查] 开始检查连接状态，共 {len(latest_statuses)} 台主机")
+        
+        for status in latest_statuses:
+            try:
+                hostname = status['hostname']
+                local_ip = status.get('local_ip', 'Unknown')
                 
-            status_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
-            time_diff = now - status_time
-            minutes_diff = time_diff.total_seconds() / 60
-            
-            # db_status 是数据库里存的旧状态，new_status 是根据当前时间算出来的新状态
-            old_status = status.get('db_status', 'online')
-            new_status = 'offline' if minutes_diff > ALERT_INTERVAL_MINUTES else 'online'
-            
-            print(f"[检查] {hostname}: 上次心跳 {minutes_diff:.1f} 分钟前 (阈值:{ALERT_INTERVAL_MINUTES}), 旧状态={old_status}, 新状态={new_status}")
-            
-            # 更新数据库中的状态
-            cursor.execute('''
-                UPDATE status_log
-                SET status = ?
-                WHERE hostname = ? AND COALESCE(server_timestamp, client_timestamp) = ?
-            ''', (new_status, hostname, timestamp_str))
-            
-            # 状态变更或持续离线重发逻辑
-            if new_status == 'offline':
-                # 检查自上次上线以来是否发送过离线通知
-                offline_count = get_consecutive_offline_count(hostname)
+                # 使用server_timestamp作为判断依据
+                timestamp_str = status.get('server_timestamp') or status.get('client_timestamp') or status.get('timestamp')
+                if not timestamp_str:
+                    print(f"[检查] {hostname}: 无时间戳，跳过")
+                    continue
+                    
+                status_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+                time_diff = now - status_time
+                minutes_diff = time_diff.total_seconds() / 60
                 
-                if offline_count == 0:
-                    print(f"[检查] {hostname}: 检测到下线 (离线:{minutes_diff:.1f}min), 发送唯一一次通知...")
-                    if send_offline_notification(hostname, minutes_diff):
-                        record_alert(hostname, alert_type='offline')
-                        print(f"[检查] {hostname}: 下线通知已发送 (本次离线周期仅此一次)")
-            
-            elif old_status == 'offline' and new_status == 'online':
-                # VPS上线通知：只要恢复在线且最近10分钟内没发过上线通知（避免频繁抖动）
-                if not has_sent_alert_recently(hostname, alert_type='online', minutes=10):
-                    print(f"[检查] {hostname}: 状态从离线恢复为在线，发送通知...")
-                    if send_online_notification(hostname, local_ip):
-                        record_alert(hostname, alert_type='online')
-                        print(f"[检查] {hostname}: 上线通知已发送")
-                        
-        except Exception as e:
-            print(f"[检查] 检查状态错误: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    conn.commit()
-    conn.close()
+                # db_status 是数据库里存的旧状态，new_status 是根据当前时间算出来的新状态
+                old_status = status.get('db_status', 'online')
+                new_status = 'offline' if minutes_diff > ALERT_INTERVAL_MINUTES else 'online'
+                
+                # 更新数据库中的状态
+                cursor.execute('''
+                    UPDATE status_log
+                    SET status = ?
+                    WHERE hostname = ? AND COALESCE(server_timestamp, client_timestamp) = ?
+                ''', (new_status, hostname, timestamp_str))
+                
+                # 只有当状态从 online 变为 offline 时才尝试发送通知
+                if old_status == 'online' and new_status == 'offline':
+                    # 检查自上次上线以来是否发送过离线通知（双重保险）
+                    if get_consecutive_offline_count(hostname) == 0:
+                        print(f"[检查] {hostname}: 检测到状态切换为下线 (离线:{minutes_diff:.1f}min), 发送通知...")
+                        if send_offline_notification(hostname, minutes_diff):
+                            record_alert(hostname, alert_type='offline')
+                            print(f"[检查] {hostname}: 下线通知已发送")
+                
+                elif old_status == 'offline' and new_status == 'online':
+                    # VPS上线通知：只要恢复在线且最近10分钟内没发过上线通知（避免频繁抖动）
+                    if not has_sent_alert_recently(hostname, alert_type='online', minutes=10):
+                        print(f"[检查] {hostname}: 状态从离线恢复为在线，发送通知...")
+                        if send_online_notification(hostname, local_ip):
+                            record_alert(hostname, alert_type='online')
+                            print(f"[检查] {hostname}: 上线通知已发送")
+                            
+            except Exception as e:
+                print(f"[检查] {hostname} 检查状态错误: {e}")
+        
+        conn.commit()
+        conn.close()
 
 @app.route('/api/status', methods=['POST'])
 def receive_status():
@@ -594,8 +589,8 @@ def receive_status():
                 status_data.get('local_ip', 'Unknown')
             )
         
-        # 接收状态后检查所有VPS的断联情况
-        check_connection_status()
+        # 接收状态后，由后台线程统一检查断联情况，避免处理请求时产生额外负载
+        # check_connection_status()
         
         return jsonify({"success": True, "message": "Status received"}), 200
         
@@ -606,7 +601,6 @@ def receive_status():
 @app.route('/api/latest', methods=['GET'])
 def get_latest():
     """获取最新状态（API）"""
-    check_connection_status()
     latest = get_latest_status_by_hostname()
     return jsonify(latest)
 
