@@ -18,8 +18,9 @@ def load_config():
     """Load configuration from config.json file"""
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
     if not os.path.exists(config_path):
-        print(f"Warning: config.json not found, using default values")
+        print(f"Warning: config.json not found at {config_path}, using default values")
         return {}
+    print(f"Loading configuration from {config_path}")
     with open(config_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
@@ -346,6 +347,9 @@ def get_latest_status_by_hostname():
                 time_diff = now - status_time
                 minutes_diff = time_diff.total_seconds() / 60
                 
+                # 记录原始数据库状态，避免被覆盖
+                status_dict['db_status'] = status_dict.get('status', 'online')
+                
                 # 更新状态和添加时间差信息
                 status_dict['status'] = 'offline' if minutes_diff > ALERT_INTERVAL_MINUTES else 'online'
                 status_dict['minutes_since_last'] = round(minutes_diff, 1)
@@ -370,38 +374,55 @@ def get_latest_status_by_hostname():
 
 def send_pushplus_notification(title, content):
     """发送PushPlus通知（通用函数）"""
+    # Check if token is configured
+    if not PUSHPLUS_TOKEN or PUSHPLUS_TOKEN == "your-pushplus-token":
+        print(f"[通知] PushPlus Token未配置，跳过通知: {title}")
+        return False
+    
     try:
         # 按照用户要求的URL格式，参数在URL中
         url = f"{PUSHPLUS_URL}?token={PUSHPLUS_TOKEN}&title={requests.utils.quote(title)}&content={requests.utils.quote(content)}&template=html"
         
+        print(f"[通知] 正在发送PushPlus通知: {title}")
+        
         # 发送POST请求
         response = requests.post(url, timeout=10)
+        
+        print(f"[通知] PushPlus响应状态码: {response.status_code}")
         
         if response.status_code == 200:
             try:
                 result = response.json()
+                print(f"[通知] PushPlus响应内容: {result}")
                 if result.get('code') == 200:
-                    print(f"PushPlus通知发送成功: {title}")
+                    print(f"[通知] PushPlus通知发送成功: {title}")
                     return True
                 else:
-                    print(f"PushPlus通知发送失败: {result.get('msg', '未知错误')}")
+                    print(f"[通知] PushPlus通知发送失败: {result.get('msg', '未知错误')}")
                     return False
             except:
                 # 如果返回的不是JSON，也认为成功（某些API可能返回纯文本）
-                print(f"PushPlus通知发送成功: {title} (HTTP {response.status_code})")
+                print(f"[通知] PushPlus通知发送成功: {title} (HTTP {response.status_code})")
                 return True
         else:
-            print(f"PushPlus通知请求失败: HTTP {response.status_code}")
+            print(f"[通知] PushPlus通知请求失败: HTTP {response.status_code}, 响应: {response.text}")
             return False
             
     except Exception as e:
-        print(f"发送PushPlus通知错误: {e}")
+        print(f"[通知] 发送PushPlus通知错误: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def send_offline_notification(hostname, minutes_offline):
     """发送PushPlus断联通知"""
     content = f"VPS断联警告\n主机名: {hostname}\n断联时间: {minutes_offline:.1f} 分钟\n检测时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n请及时检查VPS状态！"
-    return send_pushplus_notification("warning", content)
+    return send_pushplus_notification("⚠️ VPS下线警告", content)
+
+def send_online_notification(hostname, local_ip):
+    """发送PushPlus上线通知"""
+    content = f"VPS已恢复在线\n主机名: {hostname}\nIP地址: {local_ip}\n恢复时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    return send_pushplus_notification("✅ VPS恢复在线", content)
 
 def send_startup_notification():
     """发送启动通知"""
@@ -418,38 +439,73 @@ def send_delete_vps_notification(hostname, deleted_count):
     content = f"VPS已删除\n主机名: {hostname}\n删除记录数: {deleted_count} 条\n删除时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     return send_pushplus_notification("VPS删除", content)
 
-def has_sent_alert_recently(hostname, alert_time_str):
-    """检查是否在最近1小时内已发送过通知（避免重复发送）"""
+def has_sent_alert_recently(hostname, alert_type='offline', minutes=60):
+    """检查是否在最近 N 分钟内已发送过指定类型的通知（避免重复发送）"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    # 检查1小时内是否已发送过通知
+    # 使用Python计算时间阈值
+    threshold_time = (datetime.now() - timedelta(minutes=minutes)).strftime('%Y-%m-%d %H:%M:%S')
+    
+    # 检查 N 分钟内是否已发送过指定类型的通知
     cursor.execute('''
         SELECT COUNT(*) FROM alert_log
         WHERE hostname = ? 
-        AND alert_time >= datetime('now', '-1 hour')
+        AND alert_type = ?
+        AND alert_time >= ?
         AND sent = 1
-    ''', (hostname,))
+    ''', (hostname, alert_type, threshold_time))
     
     count = cursor.fetchone()[0]
     conn.close()
     return count > 0
 
-def record_alert(hostname, alert_time_str):
+def record_alert(hostname, alert_type='offline'):
     """记录已发送的通知"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
+    
+    alert_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
     try:
         cursor.execute('''
             INSERT OR IGNORE INTO alert_log (hostname, alert_time, alert_type, sent)
             VALUES (?, ?, ?, ?)
-        ''', (hostname, alert_time_str, 'offline', 1))
+        ''', (hostname, alert_time_str, alert_type, 1))
         conn.commit()
     except Exception as e:
         print(f"记录通知错误: {e}")
     finally:
         conn.close()
+
+def get_consecutive_offline_count(hostname):
+    """获取该主机自上次上线以来连续发送离线通知的次数"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    # 找到最近一次上线通知的时间
+    cursor.execute('''
+        SELECT MAX(alert_time) FROM alert_log 
+        WHERE hostname = ? AND alert_type = 'online'
+    ''', (hostname,))
+    last_online_time = cursor.fetchone()[0]
+    
+    # 统计在该时间之后发送的离线通知次数
+    if last_online_time:
+        cursor.execute('''
+            SELECT COUNT(*) FROM alert_log 
+            WHERE hostname = ? AND alert_type = 'offline' AND alert_time > ?
+        ''', (hostname, last_online_time))
+    else:
+        # 如果从来没发过上线通知，则统计所有的离线通知
+        cursor.execute('''
+            SELECT COUNT(*) FROM alert_log 
+            WHERE hostname = ? AND alert_type = 'offline'
+        ''', (hostname,))
+    
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
 
 def check_connection_status():
     """检查连接状态，更新断联记录（基于服务端时间）"""
@@ -459,38 +515,65 @@ def check_connection_status():
     latest_statuses = get_latest_status_by_hostname()
     now = datetime.now()
     
+    print(f"[检查] 开始检查连接状态，共 {len(latest_statuses)} 台主机")
+    
     for status in latest_statuses:
         try:
+            hostname = status['hostname']
+            local_ip = status.get('local_ip', 'Unknown')
+            
             # 使用server_timestamp作为判断依据
             timestamp_str = status.get('server_timestamp') or status.get('client_timestamp') or status.get('timestamp')
             if not timestamp_str:
+                print(f"[检查] {hostname}: 无时间戳，跳过")
                 continue
                 
             status_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
             time_diff = now - status_time
             minutes_diff = time_diff.total_seconds() / 60
             
-            old_status = status.get('status', 'online')
+            # db_status 是数据库里存的旧状态，new_status 是根据当前时间算出来的新状态
+            old_status = status.get('db_status', 'online')
             new_status = 'offline' if minutes_diff > ALERT_INTERVAL_MINUTES else 'online'
             
-            # 更新该主机的所有最新记录的状态
+            print(f"[检查] {hostname}: 上次心跳 {minutes_diff:.1f} 分钟前 (阈值:{ALERT_INTERVAL_MINUTES}), 旧状态={old_status}, 新状态={new_status}")
+            
+            # 更新数据库中的状态
             cursor.execute('''
                 UPDATE status_log
                 SET status = ?
                 WHERE hostname = ? AND COALESCE(server_timestamp, client_timestamp) = ?
-            ''', (new_status, status['hostname'], timestamp_str))
+            ''', (new_status, hostname, timestamp_str))
             
-            # 如果状态从online变为offline，发送通知
-            if old_status == 'online' and new_status == 'offline':
-                # 检查是否在最近1小时内已发送过通知
-                if not has_sent_alert_recently(status['hostname'], timestamp_str):
-                    print(f"检测到VPS断联: {status['hostname']}, 断联时间: {minutes_diff:.1f}分钟")
-                    if send_offline_notification(status['hostname'], minutes_diff):
-                        # 记录已发送的通知
-                        record_alert(status['hostname'], timestamp_str)
+            # 状态变更或持续离线重发逻辑
+            if new_status == 'offline':
+                # 只要满足：1.最近2分钟内没有发过离线通知
+                if not has_sent_alert_recently(hostname, alert_type='offline', minutes=2):
+                    # 检查连续发送次数
+                    offline_count = get_consecutive_offline_count(hostname)
+                    
+                    if offline_count < 5:
+                        print(f"[检查] {hostname}: 满足离线通知条件 (离线:{minutes_diff:.1f}min, 已发:{offline_count}次), 准备发送...")
+                        if send_offline_notification(hostname, minutes_diff):
+                            record_alert(hostname, alert_type='offline')
+                            print(f"[检查] {hostname}: 下线通知已发送 ({offline_count + 1}/5)")
+                    else:
+                        # 只有在第一次达到5次时打印这个日志，避免一直刷屏
+                        if offline_count == 5 and old_status == 'online':
+                             print(f"[检查] {hostname}: 已连续发送 5 次离线通知，停止后续推送")
+            
+            elif old_status == 'offline' and new_status == 'online':
+                # VPS上线通知：只要恢复在线且最近10分钟内没发过上线通知（避免频繁抖动）
+                if not has_sent_alert_recently(hostname, alert_type='online', minutes=10):
+                    print(f"[检查] {hostname}: 状态从离线恢复为在线，发送通知...")
+                    if send_online_notification(hostname, local_ip):
+                        record_alert(hostname, alert_type='online')
+                        print(f"[检查] {hostname}: 上线通知已发送")
                         
         except Exception as e:
-            print(f"检查状态错误: {e}")
+            print(f"[检查] 检查状态错误: {e}")
+            import traceback
+            traceback.print_exc()
     
     conn.commit()
     conn.close()
@@ -573,6 +656,52 @@ def get_history_chart():
     
     chart_data = get_chart_data(start_date=start_date, end_date=end_date, hostname=hostname)
     return jsonify(chart_data)
+
+@app.route('/api/test-notification', methods=['POST'])
+def test_notification():
+    """测试PushPlus通知功能"""
+    try:
+        data = request.json
+        notification_type = data.get('type', 'offline')
+        hostname = data.get('hostname', 'TestVPS')
+        local_ip = data.get('local_ip', '192.168.1.100')
+        
+        print(f"[测试] 收到通知测试请求，类型: {notification_type}, 主机: {hostname}")
+        
+        success = False
+        message = ""
+        
+        if notification_type == 'offline':
+            # Test offline notification
+            success = send_offline_notification(hostname, 25.5)
+            message = "下线通知测试"
+        elif notification_type == 'online':
+            # Test online notification
+            success = send_online_notification(hostname, local_ip)
+            message = "上线通知测试"
+        elif notification_type == 'startup':
+            # Test startup notification
+            success = send_startup_notification()
+            message = "启动通知测试"
+        else:
+            return jsonify({"success": False, "error": "未知的通知类型"}), 400
+        
+        if success:
+            return jsonify({
+                "success": True,
+                "message": f"{message}发送成功，请检查您的PushPlus接收端"
+            }), 200
+        else:
+            return jsonify({
+                "success": False,
+                "error": f"{message}发送失败，请检查Token配置和日志"
+            }), 500
+            
+    except Exception as e:
+        print(f"[测试] 通知测试错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/delete/<path:hostname>', methods=['DELETE', 'POST'])
 def delete_vps(hostname):
@@ -1191,6 +1320,9 @@ HTML_TEMPLATE = '''
                 <div class="refresh-info">
                     AUTO REFRESH: <span id="autoRefresh">30</span>s
                 </div>
+                <button class="cyber-btn" onclick="showTestNotificationModal()">
+                    <i class="fas fa-bell"></i> TEST NOTIFY
+                </button>
                 <button class="cyber-btn" onclick="loadData()">
                     <i class="fas fa-sync-alt"></i> REFRESH
                 </button>
@@ -1238,6 +1370,33 @@ HTML_TEMPLATE = '''
             <div class="modal-footer">
                 <button class="cyber-btn" onclick="closeDeleteModal()">CANCEL</button>
                 <button class="cyber-btn" style="border-color: var(--neon-red); color: var(--neon-red);" onclick="confirmDelete()">CONFIRM PURGE</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Test Notification Modal -->
+    <div id="testNotificationModal" class="modal">
+        <div class="modal-content glass-panel" style="border-color: var(--neon-blue); box-shadow: 0 0 30px rgba(0, 243, 255, 0.3);">
+            <div class="modal-header" style="color: var(--neon-blue);">
+                <i class="fas fa-bell"></i> TEST PUSHPLUS NOTIFICATION
+            </div>
+            <div class="modal-body" style="color: #ccc;">
+                <p style="margin-bottom: 20px;">选择要测试的通知类型：</p>
+                <div style="display: flex; flex-direction: column; gap: 15px;">
+                    <button class="cyber-btn" onclick="testNotification('offline')" style="width: 100%; padding: 15px; border-color: var(--neon-red); color: var(--neon-red);">
+                        <i class="fas fa-exclamation-triangle"></i> 测试VPS下线通知
+                    </button>
+                    <button class="cyber-btn" onclick="testNotification('online')" style="width: 100%; padding: 15px; border-color: var(--neon-green); color: var(--neon-green);">
+                        <i class="fas fa-check-circle"></i> 测试VPS上线通知
+                    </button>
+                    <button class="cyber-btn" onclick="testNotification('startup')" style="width: 100%; padding: 15px;">
+                        <i class="fas fa-rocket"></i> 测试系统启动通知
+                    </button>
+                </div>
+                <div id="testResult" style="margin-top: 20px; padding: 10px; border-radius: 5px; display: none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="cyber-btn" onclick="closeTestNotificationModal()">CLOSE</button>
             </div>
         </div>
     </div>
@@ -1632,6 +1791,59 @@ HTML_TEMPLATE = '''
 
         window.onclick = function(event) {
             if (event.target == document.getElementById('deleteModal')) closeDeleteModal();
+            if (event.target == document.getElementById('testNotificationModal')) closeTestNotificationModal();
+        }
+
+        // Test Notification Modal Logic
+        function showTestNotificationModal() {
+            document.getElementById('testNotificationModal').style.display = 'block';
+            document.getElementById('testResult').style.display = 'none';
+        }
+
+        function closeTestNotificationModal() {
+            document.getElementById('testNotificationModal').style.display = 'none';
+            document.getElementById('testResult').style.display = 'none';
+        }
+
+        function testNotification(type) {
+            const resultDiv = document.getElementById('testResult');
+            resultDiv.style.display = 'block';
+            resultDiv.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 正在发送测试通知...';
+            resultDiv.style.backgroundColor = 'rgba(0, 243, 255, 0.1)';
+            resultDiv.style.borderLeft = '3px solid var(--neon-blue)';
+            resultDiv.style.color = 'var(--neon-blue)';
+
+            fetch('/api/test-notification', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    type: type,
+                    hostname: 'TestVPS',
+                    local_ip: '192.168.1.100'
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    resultDiv.innerHTML = '<i class="fas fa-check-circle"></i> ' + data.message;
+                    resultDiv.style.backgroundColor = 'rgba(10, 255, 10, 0.1)';
+                    resultDiv.style.borderLeft = '3px solid var(--neon-green)';
+                    resultDiv.style.color = 'var(--neon-green)';
+                } else {
+                    resultDiv.innerHTML = '<i class="fas fa-times-circle"></i> ' + (data.error || '发送失败');
+                    resultDiv.style.backgroundColor = 'rgba(255, 0, 60, 0.1)';
+                    resultDiv.style.borderLeft = '3px solid var(--neon-red)';
+                    resultDiv.style.color = 'var(--neon-red)';
+                }
+            })
+            .catch(error => {
+                resultDiv.innerHTML = '<i class="fas fa-times-circle"></i> 请求失败: ' + error;
+                resultDiv.style.backgroundColor = 'rgba(255, 0, 60, 0.1)';
+                resultDiv.style.borderLeft = '3px solid var(--neon-red)';
+                resultDiv.style.color = 'var(--neon-red)';
+            });
         }
 
         // Init
@@ -1715,7 +1927,11 @@ if __name__ == '__main__':
     
     print("监控服务器启动")
     print(f"访问 http://localhost:{SERVER_PORT} 查看监控界面")
-    print("PushPlus通知已启用，断联时将自动发送通知")
+    print(f"当前断联检测时间: {ALERT_INTERVAL_MINUTES} 分钟")
+    if PUSHPLUS_TOKEN and PUSHPLUS_TOKEN != "your-pushplus-token":
+        print("PushPlus通知已启用 (Token已配置)")
+    else:
+        print("警告: PushPlus Token未配置，将无法发送通知")
     print("按 Ctrl+C 停止服务器")
     
     app.run(host='0.0.0.0', port=SERVER_PORT, debug=False)
