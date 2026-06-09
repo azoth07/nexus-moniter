@@ -31,11 +31,16 @@ pip install -r requirements.txt
 ```json
 {
     "server_key": "设置你的通信密钥",
+    "web_username": "admin",
+    "web_password": "设置监控页面登录密码",
+    "web_secret_key": "设置浏览器会话签名密钥",
     "pushplus_token": "填入你的 PushPlus Token",
     "alert_interval_minutes": 2,
     "server_port": 9000
 }
 ```
+*   **web_username / web_password**: 访问监控页面和查询接口时需要输入的账户密码。
+*   **web_secret_key**: 用于浏览器登录会话签名，建议设置为一段随机字符串。
 *   **PushPlus Token**: 在 [PushPlus 官网](https://www.pushplus.plus/) 获取。
 *   **alert_interval_minutes**: 建议测试设为 2，生产环境建议 15-20。
 

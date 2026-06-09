@@ -2,7 +2,7 @@
 VPS监控服务端脚本
 接收VPS状态信息并提供Web界面显示
 """
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for
 import json
 import os
 from datetime import datetime, timedelta
@@ -10,6 +10,8 @@ import sqlite3
 from threading import Lock, Thread
 import requests
 import time
+import hmac
+from functools import wraps
 
 app = Flask(__name__)
 
@@ -32,6 +34,14 @@ SERVER_KEY = _config.get("server_key", "your-secret-key")
 ALERT_INTERVAL_MINUTES = _config.get("alert_interval_minutes", 20)
 TIMEZONE_OFFSET_HOURS = _config.get("timezone_offset_hours", 0)
 SERVER_PORT = _config.get("server_port", 9000)
+WEB_USERNAME = _config.get("web_username", "admin")
+WEB_PASSWORD = _config.get("web_password", SERVER_KEY)
+
+app.secret_key = _config.get("web_secret_key", SERVER_KEY)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax"
+)
 
 # Data retention policy (days)
 DATA_RETENTION_DAYS = _config.get("data_retention_days", 30)
@@ -44,6 +54,29 @@ PUSHPLUS_URL = _config.get("pushplus_url", "https://www.pushplus.plus/send")
 
 # 数据库锁
 db_lock = Lock()
+
+def login_required(func):
+    """Require a valid web login session."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if session.get('web_authenticated'):
+            return func(*args, **kwargs)
+
+        if request.path.startswith('/api/'):
+            return jsonify({"error": "Authentication required"}), 401
+
+        return redirect(url_for('login', next=request.path))
+
+    return wrapper
+
+def is_valid_login(username, password):
+    """Compare login credentials without leaking timing details."""
+    expected_username = str(WEB_USERNAME)
+    expected_password = str(WEB_PASSWORD)
+    return (
+        hmac.compare_digest(str(username), expected_username) and
+        hmac.compare_digest(str(password), expected_password)
+    )
 
 def init_database():
     """初始化数据库"""
@@ -613,13 +646,43 @@ def receive_status():
         print(f"接收状态错误: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Web login page."""
+    error = None
+
+    if request.method == 'POST':
+        username = request.form.get('username', '')
+        password = request.form.get('password', '')
+
+        if is_valid_login(username, password):
+            session.clear()
+            session['web_authenticated'] = True
+            session['web_username'] = username
+            next_url = request.args.get('next') or url_for('index')
+            if not next_url.startswith('/') or next_url.startswith('//'):
+                next_url = url_for('index')
+            return redirect(next_url)
+
+        error = "账户或密码错误"
+
+    return render_template_string(LOGIN_TEMPLATE, error=error, username=WEB_USERNAME)
+
+@app.route('/logout', methods=['POST', 'GET'])
+def logout():
+    """Clear web login session."""
+    session.clear()
+    return redirect(url_for('login'))
+
 @app.route('/api/latest', methods=['GET'])
+@login_required
 def get_latest():
     """获取最新状态（API）"""
     latest = get_latest_status_by_hostname()
     return jsonify(latest)
 
 @app.route('/api/history', methods=['GET'])
+@login_required
 def get_history():
     """获取历史记录（API），支持分页和日期区间查询"""
     limit = request.args.get('limit', 100, type=int)
@@ -640,6 +703,7 @@ def get_history():
     return jsonify(history)
 
 @app.route('/api/history/chart', methods=['GET'])
+@login_required
 def get_history_chart():
     """获取历史记录图表数据"""
     start_date = request.args.get('start_date', None)
@@ -656,6 +720,7 @@ def get_history_chart():
     return jsonify(chart_data)
 
 @app.route('/api/test-notification', methods=['POST'])
+@login_required
 def test_notification():
     """测试PushPlus通知功能"""
     try:
@@ -698,6 +763,7 @@ def test_notification():
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/delete/<path:hostname>', methods=['DELETE', 'POST'])
+@login_required
 def delete_vps(hostname):
     """删除指定VPS的所有记录"""
     try:
@@ -748,9 +814,140 @@ def delete_vps(hostname):
         return jsonify({"success": False, "error": error_msg}), 500
 
 @app.route('/')
+@login_required
 def index():
     """Web界面"""
     return render_template_string(HTML_TEMPLATE)
+
+LOGIN_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEXUS MONITOR | 登录</title>
+    <style>
+        :root {
+            --bg-dark: #050510;
+            --panel-bg: rgba(20, 20, 35, 0.76);
+            --border: rgba(255, 255, 255, 0.14);
+            --neon-blue: #00f3ff;
+            --neon-red: #ff003c;
+            --text-main: #e0e0e0;
+            --text-dim: #8a8a9b;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            font-family: Arial, sans-serif;
+            color: var(--text-main);
+            background-color: var(--bg-dark);
+            background-image:
+                radial-gradient(circle at 20% 30%, rgba(0, 243, 255, 0.16), transparent 28%),
+                radial-gradient(circle at 80% 70%, rgba(188, 19, 254, 0.14), transparent 26%);
+        }
+
+        .login-panel {
+            width: 100%;
+            max-width: 420px;
+            padding: 34px;
+            background: var(--panel-bg);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.36);
+        }
+
+        h1 {
+            margin: 0 0 8px;
+            font-size: 28px;
+            letter-spacing: 1px;
+        }
+
+        .subtitle {
+            margin: 0 0 28px;
+            color: var(--text-dim);
+            font-size: 14px;
+        }
+
+        label {
+            display: block;
+            margin: 18px 0 8px;
+            color: var(--text-dim);
+            font-size: 13px;
+            letter-spacing: 0.5px;
+        }
+
+        input {
+            width: 100%;
+            padding: 12px 14px;
+            color: var(--text-main);
+            background: rgba(0, 0, 0, 0.34);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            outline: none;
+            font-size: 15px;
+        }
+
+        input:focus {
+            border-color: var(--neon-blue);
+            box-shadow: 0 0 0 3px rgba(0, 243, 255, 0.12);
+        }
+
+        button {
+            width: 100%;
+            margin-top: 24px;
+            padding: 12px 16px;
+            color: #001014;
+            background: var(--neon-blue);
+            border: 0;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 15px;
+            font-weight: 700;
+        }
+
+        .error {
+            margin: 18px 0 0;
+            padding: 10px 12px;
+            color: var(--neon-red);
+            background: rgba(255, 0, 60, 0.1);
+            border: 1px solid rgba(255, 0, 60, 0.32);
+            border-radius: 6px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <main class="login-panel">
+        <h1>NEXUS MONITOR</h1>
+        <p class="subtitle">请输入账户和密码查看监控页面</p>
+
+        <form method="post" autocomplete="on">
+            <label for="username">账户</label>
+            <input id="username" name="username" type="text" value="{{ username }}" required autofocus>
+
+            <label for="password">密码</label>
+            <input id="password" name="password" type="password" required>
+
+            <button type="submit">登录</button>
+
+            {% if error %}
+            <div class="error">{{ error }}</div>
+            {% endif %}
+        </form>
+    </main>
+</body>
+</html>
+'''
 
 # HTML模板
 HTML_TEMPLATE = '''
@@ -1319,6 +1516,9 @@ HTML_TEMPLATE = '''
                 </button>
                 <button class="cyber-btn" onclick="loadData()">
                     <i class="fas fa-sync-alt"></i> REFRESH
+                </button>
+                <button class="cyber-btn" onclick="window.location.href='/logout'">
+                    <i class="fas fa-sign-out-alt"></i> LOGOUT
                 </button>
             </div>
         </div>

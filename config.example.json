@@ -1,6 +1,9 @@
 {
     "db_file": "monitor.db",
     "server_key": "your-secret-key-here",
+    "web_username": "admin",
+    "web_password": "change-this-web-password",
+    "web_secret_key": "change-this-session-secret",
     "alert_interval_minutes": 20,
     "timezone_offset_hours": 0,
     "pushplus_token": "your-pushplus-token-here",
