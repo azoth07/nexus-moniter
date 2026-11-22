@@ -8,6 +8,8 @@ import socket
 import json
 import time
 import platform
+import argparse
+from pathlib import Path
 from datetime import datetime
 import logging
 from logging.handlers import RotatingFileHandler
@@ -127,5 +129,18 @@ def main():
             time.sleep(60)  # 出错后等待1分钟再继续
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-set", "--set", type=Path, help="用户设定文件（JSON）")
+    args = parser.parse_args()
+    settings_path = args.set or Path(__file__).with_name("client.set")
+    if args.set or settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            SERVER_URL = settings["SERVER_URL"]
+            SERVER_KEY = settings["SERVER_KEY"]
+            if not isinstance(SERVER_URL, str) or not isinstance(SERVER_KEY, str):
+                raise ValueError("SERVER_URL 和 SERVER_KEY 必须是字符串")
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            parser.error(f"无法载入 {settings_path}: {error}")
     main()
 

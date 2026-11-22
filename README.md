@@ -45,6 +45,11 @@ pip install -r requirements.txt
 *   **alert_interval_minutes**: 建议测试设为 2，生产环境建议 15-20。
 
 ### 3. 配置客户端 (client.py)
+Windows x64 客户端位于 `windows-client`。将 `client.example.set.json` 复制为 EXE 同目录的 `client.set`，填入服务端完整的 `/api/status` 地址和通信密钥。双击 `nexus-client.exe` 可查看最近一次上报结果，关闭窗口即停止监控。无窗口运行可使用 `.\nexus-client.exe -headless`，日志在 EXE 同目录。客户端启动后立即上报，之后每 15 分钟上报一次。
+
+`client.set` 是 UTF-8 JSON，字段为 `SERVER_URL` 和 `SERVER_KEY`。EXE 和 Python 均支持 `-set 文件路径`。已有旧版脚本时，可在 `windows-client` 目录运行 `python import_set.py "旧客户端路径" client.set` 导入两项设定，导入工具会保留已有的目标文件。部署只需 EXE 和设定文件。要重新编译，可在安装 Go 1.27.3 或更高版本的 Windows x64 上运行 `.\build.ps1`，依赖缓存保存在同目录的 `.nsgo-cache`。
+
+Python 客户端默认读取脚本同目录的 `client.set`。未提供设定文件时，沿用以下方式：
 修改 `client.py` 顶部的配置：
 ```python
 SERVER_URL = "http://你的服务端IP:9000/api/status"

@@ -1,5 +1,9 @@
 # Configuration (contains sensitive data)
 config.json
+*.set
+.nsgo-cache/
+windows-client/rsrc_windows_amd64.syso
+monitor_client.log*
 
 # Database
 *.db
